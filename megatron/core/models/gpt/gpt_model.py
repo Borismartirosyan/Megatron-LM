@@ -17,6 +17,7 @@ from megatron.core.transformer.spec_utils import ModuleSpec
 from megatron.core.transformer.transformer_block import TransformerBlock
 from megatron.core.transformer.transformer_config import TransformerConfig
 from megatron.core.utils import make_tp_sharded_tensor_for_checkpoint
+import random
 
 
 class GPTModel(LanguageModule):
@@ -65,6 +66,16 @@ class GPTModel(LanguageModule):
         self.parallel_output = parallel_output
         self.share_embeddings_and_output_weights = share_embeddings_and_output_weights
         self.position_embedding_type = position_embedding_type
+
+        #embedmix
+        if config.use_embedmix:
+            self.embedmix_arguments = {
+            'subset_perturb' : config.embedmix_subset_perturb,
+            'embedding_perturb' : config.embedmix_embedding_perturb,
+            'perturb_tokens_per_seq' : config.embedmix_perturb_tokens_per_seq,
+            'augment_type' : config.embedmix_augment_type,
+            'alpha' : config.embedmix_alpha,
+            }
 
         # megatron core pipelining currently depends on model type
         # TODO: remove this dependency ?
@@ -127,6 +138,67 @@ class GPTModel(LanguageModule):
 
         assert len(input_tensor) == 1, 'input_tensor should only be length 1 for gpt/bert'
         self.decoder.set_input_tensor(input_tensor[0])
+    
+    @staticmethod
+    def embedmix_augment(
+        dencoder_input: torch.Tensor,
+        subset_perturb: float,
+        embedding_perturb: float,
+        perturb_tokens_per_seq: float,
+        augment_type='addition',
+        alpha: float = 0.5,
+    ) -> torch.Tensor:
+
+        """
+        Data augmentation function embedmix which randomly swaps some parts of embeddings in a sequence
+
+        Parameters:
+            encoder_input : input embeddings, [x, y, z] x = tokens, y = batch_size, z = embedding dim
+            subset_perturb : which percent of sequences in a batch should be perturbed, belongs to [0, 1]
+            embedding_perturb : which percent of single embedding should be perturbed, this is for embedding mask creation [0, 1]
+            perturb_tokens_per_seq : which percent of embeddings in a single sequence should be perturbed [0, 1] 
+        Returns:
+            encoder_input: augmented_datapoints
+        """
+        if subset_perturb == 0:
+            return dencoder_input
+        dencoder_input = dencoder_input.clone() # making copy to avoid pytorch autograd problems
+        batch_perturb_indeces = None
+        if dencoder_input.size(1) == 1:  # batch size equals 1
+            index = random.randint(
+                0, 1
+            )  # decided will the single sequence in a batch be augmented or not, E(X) ~ 0.5, Bernoulli distribution
+            if index:
+                batch_perturb_indeces = [0]
+            else:
+                return dencoder_input
+        else:
+            batch_perturb_indeces = random.sample(
+                range(dencoder_input.size(1)), round(subset_perturb * dencoder_input.size(1))
+            )
+        for batch in batch_perturb_indeces:
+            tokens_perturb_quantity = round(dencoder_input.size(0) * perturb_tokens_per_seq)
+            if tokens_perturb_quantity % 2 == 1:
+                tokens_perturb_quantity += 1
+            tokens_perturb_indices_pairs = torch.LongTensor(
+                random.sample(range(dencoder_input.size(0)), tokens_perturb_quantity)
+            ).reshape(-1, 2)
+            for token_pair in tokens_perturb_indices_pairs:
+                if augment_type == 'swap':
+                    perturb_mask_len = round(dencoder_input.size(2) * embedding_perturb)
+                    embedding_perturb_mask_start = random.randint(0, dencoder_input.size(2) - perturb_mask_len)
+                    embedding_perturb_mask_end = embedding_perturb_mask_start + perturb_mask_len
+                    (
+                        dencoder_input[token_pair[0]][batch][embedding_perturb_mask_start:embedding_perturb_mask_end],
+                        dencoder_input[token_pair[1]][batch][embedding_perturb_mask_start:embedding_perturb_mask_end],
+                    ) = (
+                        dencoder_input[token_pair[1]][batch][embedding_perturb_mask_start:embedding_perturb_mask_end],
+                        dencoder_input[token_pair[0]][batch][embedding_perturb_mask_start:embedding_perturb_mask_end],
+                    )
+                if augment_type == 'addition':
+                    dencoder_input[token_pair[0]][batch] += alpha * dencoder_input[token_pair[1]][batch]
+
+        return dencoder_input
 
     def forward(
         self,
@@ -166,14 +238,25 @@ class GPTModel(LanguageModule):
             )
             rotary_pos_emb = self.rotary_pos_emb(rotary_seq_len)
 
-        # Run decoder.
+        # Run decoder
+
+        if self.config.use_embedmix:
+            decoder_input = self.embedmix_augment(
+                dencoder_input = decoder_input,
+                subset_perturb = self.embedmix_arguments['subset_perturb'],
+                embedding_perturb = self.embedmix_arguments['embedding_perturb'],
+                perturb_tokens_per_seq = self.embedmix_arguments['perturb_tokens_per_seq'],
+                augment_type = self.embedmix_arguments['augment_type'],
+                alpha = self.embedmix_arguments['alpha']
+            )
+        
         hidden_states = self.decoder(
-            hidden_states=decoder_input,
-            attention_mask=attention_mask,
-            inference_params=inference_params,
-            rotary_pos_emb=rotary_pos_emb,
-            packed_seq_params=packed_seq_params,
-            **(extra_block_kwargs or {}),
+        hidden_states=decoder_input,
+        attention_mask=attention_mask,
+        inference_params=inference_params,
+        rotary_pos_emb=rotary_pos_emb,
+        packed_seq_params=packed_seq_params,
+        **(extra_block_kwargs or {}),
         )
 
         if not self.post_process:
