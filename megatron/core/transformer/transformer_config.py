@@ -138,12 +138,12 @@ class TransformerConfig(ModelParallelConfig):
     moe_input_jitter_eps: float = None
     moe_token_dropping: bool = False  # TODO: Support token dropping.
 
-    use_embedmix = True
-    embedmix_subset_perturb: float = 0.1
-    embedmix_embedding_perturb: float = 0.2
-    embedmix_perturb_tokens_per_seq: float = 0.3
-    embedmix_augment_type: str = 'addition'
-    embedmix_alpha: float = 0.1
+    # use_embedmix = False
+    # embedmix_subset_perturb: float = 0.1
+    # embedmix_embedding_perturb: float = 0.2
+    # embedmix_perturb_tokens_per_seq: float = 0.3
+    # embedmix_augment_type: str = 'addition'
+    # embedmix_alpha: float = 0.1
 
     def __post_init__(self):
         """ Python dataclass method that is used to modify attributes after initialization.

@@ -54,6 +54,13 @@ class GPTModel(LanguageModule):
         rotary_percent: float = 1.0,
         rotary_base: int = 10000,
         seq_len_interpolation_factor: Optional[float] = None,
+        use_embedmix: bool = False,
+        embedmix_subset_perturb: float = 0.1,
+        embedmix_embedding_perturb: float = 0.1,
+        embedmix_perturb_tokens_per_seq: float = 0.1,
+        embedmix_augment_type: str = 'addition',
+        embedmix_alpha: float = 0.1,
+
     ) -> None:
         super().__init__(config=config)
 
@@ -68,14 +75,12 @@ class GPTModel(LanguageModule):
         self.position_embedding_type = position_embedding_type
 
         #embedmix
-        if config.use_embedmix:
-            self.embedmix_arguments = {
-            'subset_perturb' : config.embedmix_subset_perturb,
-            'embedding_perturb' : config.embedmix_embedding_perturb,
-            'perturb_tokens_per_seq' : config.embedmix_perturb_tokens_per_seq,
-            'augment_type' : config.embedmix_augment_type,
-            'alpha' : config.embedmix_alpha,
-            }
+        self.use_embedmix = use_embedmix
+        self.embedmix_subset_perturb = embedmix_subset_perturb
+        self.embedmix_embedding_perturb = embedmix_embedding_perturb
+        self.embedmix_perturb_tokens_per_seq = embedmix_perturb_tokens_per_seq
+        self.embedmix_augment_type = embedmix_augment_type
+        self.embedmix_alpha = embedmix_alpha
 
         # megatron core pipelining currently depends on model type
         # TODO: remove this dependency ?
@@ -153,9 +158,9 @@ class GPTModel(LanguageModule):
         Data augmentation function embedmix which randomly swaps some parts of embeddings in a sequence
 
         Parameters:
-            encoder_input : input embeddings, [x, y, z] x = tokens, y = batch_size, z = embedding dim
+            encoder_input : input embeddings, [x, y, z] x = tokens_quantity, y = batch_size, z = embedding_dim
             subset_perturb : which percent of sequences in a batch should be perturbed, belongs to [0, 1]
-            embedding_perturb : which percent of single embedding should be perturbed, this is for embedding mask creation [0, 1]
+            embedding_perturb : which percent of single embedding should be perturbed, this is for embedding mask creation [0, 1], used for swap
             perturb_tokens_per_seq : which percent of embeddings in a single sequence should be perturbed [0, 1] 
         Returns:
             encoder_input: augmented_datapoints
@@ -177,7 +182,11 @@ class GPTModel(LanguageModule):
                 range(dencoder_input.size(1)), round(subset_perturb * dencoder_input.size(1))
             )
         for batch in batch_perturb_indeces:
-            tokens_perturb_quantity = round(dencoder_input.size(0) * perturb_tokens_per_seq)
+            if augment_type == 'swap':
+                tokens_perturb_quantity = round(dencoder_input.size(0) * perturb_tokens_per_seq)
+            if augment_type == 'addition':
+                tokens_perturb_quantity = round(dencoder_input.size(0) * perturb_tokens_per_seq) * 2 # to create pairs of tokens_quantity * perturb_tokens_per_seq 
+
             if tokens_perturb_quantity % 2 == 1:
                 tokens_perturb_quantity += 1
             tokens_perturb_indices_pairs = torch.LongTensor(
@@ -196,7 +205,8 @@ class GPTModel(LanguageModule):
                         dencoder_input[token_pair[0]][batch][embedding_perturb_mask_start:embedding_perturb_mask_end],
                     )
                 if augment_type == 'addition':
-                    dencoder_input[token_pair[0]][batch] += alpha * dencoder_input[token_pair[1]][batch]
+                    vector_prime = dencoder_input[token_pair[1]][batch].clone()
+                    dencoder_input[token_pair[0]][batch] += alpha * vector_prime
 
         return dencoder_input
 
@@ -240,14 +250,14 @@ class GPTModel(LanguageModule):
 
         # Run decoder
 
-        if self.config.use_embedmix:
+        if self.use_embedmix:
             decoder_input = self.embedmix_augment(
                 dencoder_input = decoder_input,
-                subset_perturb = self.embedmix_arguments['subset_perturb'],
-                embedding_perturb = self.embedmix_arguments['embedding_perturb'],
-                perturb_tokens_per_seq = self.embedmix_arguments['perturb_tokens_per_seq'],
-                augment_type = self.embedmix_arguments['augment_type'],
-                alpha = self.embedmix_arguments['alpha']
+                subset_perturb = self.embedmix_subset_perturb,
+                embedding_perturb = self.embedmix_embedding_perturb ,
+                perturb_tokens_per_seq = self.embedmix_perturb_tokens_per_seq,
+                augment_type = self.embedmix_augment_type,
+                alpha = self.embedmix_alpha
             )
         
         hidden_states = self.decoder(
