@@ -185,13 +185,15 @@ class GPTModel(LanguageModule):
             if augment_type == 'swap':
                 tokens_perturb_quantity = round(dencoder_input.size(0) * perturb_tokens_per_seq)
             if augment_type == 'addition':
-                tokens_perturb_quantity = round(dencoder_input.size(0) * perturb_tokens_per_seq) * 2 # to create pairs of tokens_quantity * perturb_tokens_per_seq 
+                tokens_perturb_quantity = round(dencoder_input.size(0) * perturb_tokens_per_seq) # to create pairs of tokens_quantity * perturb_tokens_per_seq 
 
             if tokens_perturb_quantity % 2 == 1:
                 tokens_perturb_quantity += 1
+            all_pairs = [(i, j) for i in range(dencoder_input.size(0)) for j in range(i+1, dencoder_input.size(0))]
+            random.shuffle(all_pairs)
             tokens_perturb_indices_pairs = torch.LongTensor(
-                random.sample(range(dencoder_input.size(0)), tokens_perturb_quantity)
-            ).reshape(-1, 2)
+                all_pairs
+            ).reshape(-1, 2)[:tokens_perturb_quantity]
             for token_pair in tokens_perturb_indices_pairs:
                 if augment_type == 'swap':
                     perturb_mask_len = round(dencoder_input.size(2) * embedding_perturb)
@@ -250,7 +252,7 @@ class GPTModel(LanguageModule):
 
         # Run decoder
 
-        if self.use_embedmix:
+        if self.use_embedmix and self.training:
             decoder_input = self.embedmix_augment(
                 dencoder_input = decoder_input,
                 subset_perturb = self.embedmix_subset_perturb,
